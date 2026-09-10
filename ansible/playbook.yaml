@@ -1,0 +1,13 @@
+- name: Configure all servers
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Updating cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Installing curl
+      ansible.builtin.apt:
+        name: curl
+        state: present
