@@ -1,0 +1,21 @@
+loadbalancer:
+  hosts:
+    loadbalancer_host_01:
+      ansible_host: 192.168.56.10
+
+webservers:
+  hosts:
+    webserver_host_01:
+      ansible_host: 192.168.56.11
+    webserver_host_02:
+      ansible_host: 192.168.56.12
+
+app:
+  hosts:
+    app_host_01:
+      ansible_host: 192.168.56.13
+
+cicd:
+  hosts:
+    cicd_host_01:
+      ansible_host: 192.168.56.14
