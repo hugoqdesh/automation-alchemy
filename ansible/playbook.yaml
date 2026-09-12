@@ -19,6 +19,7 @@
           - git
           - unzip
           - ufw
+          - openssh-client
           - openssh-server
         state: present
 
@@ -131,6 +132,10 @@
         state: started
         enabled: true
 
+    - name: Verify load balancer nginx is active
+      ansible.builtin.command: systemctl is-active nginx
+      changed_when: false
+
   handlers:
     - name: Reload nginx
       ansible.builtin.service:
@@ -231,6 +236,10 @@
         state: started
         enabled: true
 
+    - name: Verify web server nginx is active
+      ansible.builtin.command: systemctl is-active nginx
+      changed_when: false
+
   handlers:
     - name: Reload nginx
       ansible.builtin.service:
@@ -265,6 +274,25 @@
         state: started
         enabled: true
 
+    - name: Trust local docker registry
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {
+            "insecure-registries": ["192.168.56.14:5000"]
+          }
+      notify: Restart docker
+
+    - name: Apply docker registry configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify docker is active
+      ansible.builtin.command: systemctl is-active docker
+      changed_when: false
+
     - name: Create application directory
       ansible.builtin.file:
         path: /opt/app
@@ -281,12 +309,95 @@
         group: deploy
         mode: "0755"
 
-    - name: Allow application port
+    - name: Configure application deployment service
+      ansible.builtin.copy:
+        dest: /opt/app/compose.yaml
+        owner: deploy
+        group: deploy
+        mode: "0644"
+        content: |
+          services:
+            diagnostic-app:
+              container_name: diagnostic-app
+              image: ${APP_IMAGE:?APP_IMAGE must be an immutable Git-SHA image reference}
+              network_mode: host
+              restart: unless-stopped
+
+    - name: Create application deployment script
+      ansible.builtin.copy:
+        dest: /opt/app/deploy.sh
+        owner: root
+        group: deploy
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          app_image="${1:?usage: deploy.sh <immutable-image-reference>}"
+          expected_pattern='^192\.168\.56\.14:5000/diagnostic-app:[a-f0-9]{40}$'
+          if [[ ! "$app_image" =~ $expected_pattern ]]; then
+            echo "APP_IMAGE must use the local registry and a full Git SHA tag" >&2
+            exit 2
+          fi
+
+          umask 077
+          printf 'APP_IMAGE=%s\n' "$app_image" > /opt/app/release.env
+          docker compose --env-file /opt/app/release.env \
+            --file /opt/app/compose.yaml up --detach
+
+    - name: Create application release health-check script
+      ansible.builtin.copy:
+        dest: /opt/app/verify-release.sh
+        owner: root
+        group: deploy
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          test -r /opt/app/release.env
+          source /opt/app/release.env
+          expected_pattern='^192\.168\.56\.14:5000/diagnostic-app:[a-f0-9]{40}$'
+          if [[ ! "${APP_IMAGE:-}" =~ $expected_pattern ]]; then
+            echo "release.env does not contain an immutable application image" >&2
+            exit 2
+          fi
+
+          running_image="$(docker inspect --format '{{ "{{" }}.Config.Image{{ "}}" }}' diagnostic-app)"
+          test "$running_image" = "$APP_IMAGE"
+          curl --fail --silent --show-error http://127.0.0.1:3000/health
+
+    - name: Create application SSH directory
+      ansible.builtin.file:
+        path: /home/deploy/.ssh
+        state: directory
+        owner: deploy
+        group: deploy
+        mode: "0700"
+
+    - name: Remove broad application port rule
       community.general.ufw:
         rule: allow
         port: "3000"
         proto: tcp
         src: "192.168.56.0/24"
+        delete: true
+
+    - name: Allow application port from web servers only
+      community.general.ufw:
+        rule: allow
+        port: "3000"
+        proto: tcp
+        src: "{{ item }}"
+      loop:
+        - "192.168.56.11"
+        - "192.168.56.12"
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
 
 # ============
 # CI/CD SERVER
@@ -316,6 +427,25 @@
         state: started
         enabled: true
 
+    - name: Trust local docker registry
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {
+            "insecure-registries": ["192.168.56.14:5000"]
+          }
+      notify: Restart Docker
+
+    - name: Apply Docker registry configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify Docker is active
+      ansible.builtin.command: systemctl is-active docker
+      changed_when: false
+
     - name: Create ci/cd directory
       ansible.builtin.file:
         path: /opt/cicd
@@ -339,6 +469,35 @@
         owner: "1000"
         group: "1000"
         mode: "0750"
+
+    - name: Create jenkins ssh directory
+      ansible.builtin.file:
+        path: /opt/cicd/jenkins_home/.ssh
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+
+    - name: Generate jenkins deployment key
+      ansible.builtin.command:
+        cmd: >-
+          ssh-keygen -t ed25519 -N '' -f
+          /opt/cicd/jenkins_home/.ssh/id_ed25519
+        creates: /opt/cicd/jenkins_home/.ssh/id_ed25519
+
+    - name: Set jenkins deployment private-key permissions
+      ansible.builtin.file:
+        path: /opt/cicd/jenkins_home/.ssh/id_ed25519
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+
+    - name: Set Jenkins deployment public-key permissions
+      ansible.builtin.file:
+        path: /opt/cicd/jenkins_home/.ssh/id_ed25519.pub
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
 
     - name: Create jenkins image definition
       ansible.builtin.copy:
@@ -384,8 +543,7 @@
               image: registry:2
               container_name: local-registry
               restart: unless-stopped
-              ports:
-                - "5000:5000"
+              network_mode: host
               volumes:
                 - /opt/cicd/registry:/var/lib/registry
 
@@ -395,15 +553,78 @@
         chdir: /opt/cicd
       changed_when: false
 
+    - name: Wait for jenkins to become ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/login
+        status_code: 200
+      register: jenkins_health
+      until: jenkins_health.status == 200
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Verify local docker registry is ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:5000/v2/
+        status_code: 200
+      register: registry_health
+      until: registry_health.status == 200
+      retries: 10
+      delay: 2
+      changed_when: false
+
     - name: Allow jenkins web interface
       community.general.ufw:
         rule: allow
         port: "8080"
         proto: tcp
 
-    - name: Allow docker registry
+    - name: Remove broad docker registry rule
       community.general.ufw:
         rule: allow
         port: "5000"
         proto: tcp
         src: "192.168.56.0/24"
+        delete: true
+
+    - name: Allow docker registry
+      community.general.ufw:
+        rule: allow
+        port: "5000"
+        proto: tcp
+        src: "{{ item }}"
+      loop:
+        - "192.168.56.13"
+        - "192.168.56.14"
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+
+# =============================
+# JENKINS DEPLOYMENT SSH ACCESS
+# =============================
+
+- name: Authorize jenkins deployment key on application server
+  hosts: app
+  become: true
+
+  tasks:
+    - name: Read jenkins deployment public key
+      ansible.builtin.slurp:
+        src: /opt/cicd/jenkins_home/.ssh/id_ed25519.pub
+      delegate_to: "{{ groups['cicd'][0] }}"
+      run_once: true
+      register: jenkins_deployment_public_key
+      changed_when: false
+
+    - name: Authorize jenkins deployment public key for deploy user
+      ansible.builtin.lineinfile:
+        path: /home/deploy/.ssh/authorized_keys
+        line: "{{ jenkins_deployment_public_key.content | b64decode }}"
+        create: true
+        owner: deploy
+        group: deploy
+        mode: "0600"
