@@ -394,7 +394,7 @@
         - "192.168.56.12"
 
   handlers:
-    - name: Restart Docker
+    - name: Restart docker
       ansible.builtin.service:
         name: docker
         state: restarted
@@ -437,12 +437,12 @@
           {
             "insecure-registries": ["192.168.56.14:5000"]
           }
-      notify: Restart Docker
+      notify: Restart docker
 
-    - name: Apply Docker registry configuration
+    - name: Apply docker registry configuration
       ansible.builtin.meta: flush_handlers
 
-    - name: Verify Docker is active
+    - name: Verify docker is active
       ansible.builtin.command: systemctl is-active docker
       changed_when: false
 
@@ -598,7 +598,7 @@
         - "192.168.56.14"
 
   handlers:
-    - name: Restart Docker
+    - name: Restart docker
       ansible.builtin.service:
         name: docker
         state: restarted
