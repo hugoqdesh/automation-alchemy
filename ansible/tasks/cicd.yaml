@@ -102,7 +102,38 @@
       RUN apt-get update \
           && apt-get install --no-install-recommends -y docker.io docker-cli openssh-client \
           && rm -rf /var/lib/apt/lists/*
+      RUN jenkins-plugin-cli --plugins configuration-as-code job-dsl
       USER jenkins
+
+- name: Configure Jenkins automatically
+  ansible.builtin.copy:
+    dest: /opt/cicd/jenkins.yaml
+    owner: deploy
+    group: deploy
+    mode: "0644"
+    content: |
+      jenkins:
+        systemMessage: "Jenkins is configured by Ansible."
+
+      jobs:
+        - script: |
+            pipelineJob('diagnostic-app') {
+              description('Build and deploy the diagnostic application')
+              definition {
+                cpsScm {
+                  scm {
+                    git {
+                      remote {
+                        url('https://github.com/hugoqdesh/automation-alchemy.git')
+                      }
+                      branches('*/main')
+                    }
+                  }
+                  scriptPath('Jenkinsfile')
+                  lightweight(true)
+                }
+              }
+            }
 
 - name: Read docker socket group ID
   ansible.builtin.command: stat --format=%g /var/run/docker.sock
@@ -124,8 +155,11 @@
           restart: unless-stopped
           ports:
             - "8080:8080"
+          environment:
+            CASC_JENKINS_CONFIG: /var/jenkins_home/jenkins.yaml
           volumes:
             - /opt/cicd/jenkins_home:/var/jenkins_home
+            - /opt/cicd/jenkins.yaml:/var/jenkins_home/jenkins.yaml:ro
             - /var/run/docker.sock:/var/run/docker.sock
           group_add:
             - "{{ docker_socket_gid.stdout }}"
