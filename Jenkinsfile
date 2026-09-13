@@ -44,7 +44,22 @@ pipeline {
                       -o StrictHostKeyChecking=no \
                       -o UserKnownHostsFile=/dev/null \
                       deploy@192.168.56.13 \
-                      "docker pull '$image' && /opt/app/deploy.sh '$image' && /opt/app/verify-release.sh"
+                      "docker pull '$image' && /opt/app/deploy.sh '$image'"
+                '''
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh '''
+                    set -eu
+                    ssh -i /var/jenkins_home/.ssh/id_ed25519 \
+                      -o BatchMode=yes \
+                      -o IdentitiesOnly=yes \
+                      -o StrictHostKeyChecking=no \
+                      -o UserKnownHostsFile=/dev/null \
+                      deploy@192.168.56.13 \
+                      /opt/app/verify-release.sh
                 '''
             }
         }

@@ -100,7 +100,7 @@
       FROM jenkins/jenkins:lts-jdk17
       USER root
       RUN apt-get update \
-          && apt-get install --no-install-recommends -y docker.io openssh-client \
+          && apt-get install --no-install-recommends -y docker.io docker-cli openssh-client \
           && rm -rf /var/lib/apt/lists/*
       USER jenkins
 
@@ -140,7 +140,7 @@
 
 - name: Start jenkins and the local image registry
   ansible.builtin.command:
-    cmd: docker compose -f /opt/cicd/compose.yaml up --build --detach
+    cmd: docker compose -f /opt/cicd/compose.yaml up --build --force-recreate --detach
     chdir: /opt/cicd
   changed_when: false
 
