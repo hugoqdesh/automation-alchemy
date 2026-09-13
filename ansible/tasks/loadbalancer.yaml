@@ -1,0 +1,47 @@
+---
+- name: Install nginx
+  ansible.builtin.apt: { name: nginx, state: present }
+- name: Allow http through firewall
+  community.general.ufw: { rule: allow, port: "80", proto: tcp }
+- name: Configure nginx load balancer
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/loadbalancer
+    mode: "0644"
+    content: |
+      upstream webservers {
+          server 192.168.56.11;
+          server 192.168.56.12;
+      }
+      server {
+          listen 80;
+          server_name _;
+          location / {
+              proxy_pass http://webservers;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+      }
+  notify: Reload nginx
+- name: Enable load balancer conf
+  ansible.builtin.file:
+    {
+      src: /etc/nginx/sites-available/loadbalancer,
+      dest: /etc/nginx/sites-enabled/loadbalancer,
+      state: link,
+      force: true,
+    }
+  notify: Reload nginx
+- name: Remove default nginx conf
+  ansible.builtin.file:
+    { path: /etc/nginx/sites-enabled/default, state: absent }
+  notify: Reload nginx
+- name: Validate nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+- name: Ensure nginx is running
+  ansible.builtin.service: { name: nginx, state: started, enabled: true }
+- name: Verify load balancer nginx is active
+  ansible.builtin.command: systemctl is-active nginx
+  changed_when: false

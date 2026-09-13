@@ -1,0 +1,138 @@
+---
+- name: Install docker
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Add deploy user to docker group
+  ansible.builtin.user:
+    name: deploy
+    groups: docker
+    append: true
+
+- name: Start docker
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Trust local docker registry
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "insecure-registries": ["192.168.56.14:5000"]
+      }
+  notify: Restart docker
+
+- name: Apply docker registry configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify docker is active
+  ansible.builtin.command: systemctl is-active docker
+  changed_when: false
+
+- name: Create application directory
+  ansible.builtin.file:
+    path: /opt/app
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0755"
+
+- name: Create deployment directory
+  ansible.builtin.file:
+    path: /opt/app/releases
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0755"
+
+- name: Configure application deployment service
+  ansible.builtin.copy:
+    dest: /opt/app/compose.yaml
+    owner: deploy
+    group: deploy
+    mode: "0644"
+    content: |
+      services:
+        diagnostic-app:
+          container_name: diagnostic-app
+          image: ${APP_IMAGE:?APP_IMAGE must be an immutable Git-SHA image reference}
+          network_mode: host
+          restart: unless-stopped
+
+- name: Create application deployment script
+  ansible.builtin.copy:
+    dest: /opt/app/deploy.sh
+    owner: root
+    group: deploy
+    mode: "0750"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      app_image="${1:?usage: deploy.sh <immutable-image-reference>}"
+      expected_pattern='^192\.168\.56\.14:5000/diagnostic-app:[a-f0-9]{40}$'
+      if [[ ! "$app_image" =~ $expected_pattern ]]; then
+        echo "APP_IMAGE must use the local registry and a full Git SHA tag" >&2
+        exit 2
+      fi
+
+      umask 077
+      printf 'APP_IMAGE=%s\n' "$app_image" > /opt/app/release.env
+      docker compose --env-file /opt/app/release.env \
+        --file /opt/app/compose.yaml up --detach
+
+- name: Create application release health-check script
+  ansible.builtin.copy:
+    dest: /opt/app/verify-release.sh
+    owner: root
+    group: deploy
+    mode: "0750"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      test -r /opt/app/release.env
+      source /opt/app/release.env
+      expected_pattern='^192\.168\.56\.14:5000/diagnostic-app:[a-f0-9]{40}$'
+      if [[ ! "${APP_IMAGE:-}" =~ $expected_pattern ]]; then
+        echo "release.env does not contain an immutable application image" >&2
+        exit 2
+      fi
+
+      running_image="$(docker inspect --format '{{ "{{" }}.Config.Image{{ "}}" }}' diagnostic-app)"
+      test "$running_image" = "$APP_IMAGE"
+      curl --fail --silent --show-error http://127.0.0.1:3000/health
+
+- name: Create application SSH directory
+  ansible.builtin.file:
+    path: /home/deploy/.ssh
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0700"
+
+- name: Remove broad application port rule
+  community.general.ufw:
+    rule: allow
+    port: "3000"
+    proto: tcp
+    src: "192.168.56.0/24"
+    delete: true
+
+- name: Allow application port from web servers only
+  community.general.ufw:
+    rule: allow
+    port: "3000"
+    proto: tcp
+    src: "{{ item }}"
+  loop:
+    - "192.168.56.11"
+    - "192.168.56.12"

@@ -1,0 +1,194 @@
+---
+- name: Install docker
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Add deploy user to docker group
+  ansible.builtin.user:
+    name: deploy
+    groups: docker
+    append: true
+
+- name: Start docker
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Trust local docker registry
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "insecure-registries": ["192.168.56.14:5000"]
+      }
+  notify: Restart docker
+
+- name: Apply docker registry configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify docker is active
+  ansible.builtin.command: systemctl is-active docker
+  changed_when: false
+
+- name: Create ci/cd directory
+  ansible.builtin.file:
+    path: /opt/cicd
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0755"
+
+- name: Create registry directory
+  ansible.builtin.file:
+    path: /opt/cicd/registry
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0755"
+
+- name: Create Jenkins data directory
+  ansible.builtin.file:
+    path: /opt/cicd/jenkins_home
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0750"
+
+- name: Create jenkins ssh directory
+  ansible.builtin.file:
+    path: /opt/cicd/jenkins_home/.ssh
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0700"
+
+- name: Generate jenkins deployment key
+  ansible.builtin.command:
+    cmd: >-
+      ssh-keygen -t ed25519 -N '' -f
+      /opt/cicd/jenkins_home/.ssh/id_ed25519
+    creates: /opt/cicd/jenkins_home/.ssh/id_ed25519
+
+- name: Set jenkins deployment private-key permissions
+  ansible.builtin.file:
+    path: /opt/cicd/jenkins_home/.ssh/id_ed25519
+    owner: "1000"
+    group: "1000"
+    mode: "0600"
+
+- name: Set Jenkins deployment public-key permissions
+  ansible.builtin.file:
+    path: /opt/cicd/jenkins_home/.ssh/id_ed25519.pub
+    owner: "1000"
+    group: "1000"
+    mode: "0644"
+
+- name: Create jenkins image definition
+  ansible.builtin.copy:
+    dest: /opt/cicd/Dockerfile
+    owner: deploy
+    group: deploy
+    mode: "0644"
+    content: |
+      FROM jenkins/jenkins:lts-jdk17
+      USER root
+      RUN apt-get update \
+          && apt-get install --no-install-recommends -y docker.io openssh-client \
+          && rm -rf /var/lib/apt/lists/*
+      USER jenkins
+
+- name: Read docker socket group ID
+  ansible.builtin.command: stat --format=%g /var/run/docker.sock
+  register: docker_socket_gid
+  changed_when: false
+
+- name: Configure jenkins and the local image registry
+  ansible.builtin.copy:
+    dest: /opt/cicd/compose.yaml
+    owner: deploy
+    group: deploy
+    mode: "0644"
+    content: |
+      services:
+        jenkins:
+          build:
+            context: .
+          container_name: jenkins
+          restart: unless-stopped
+          ports:
+            - "8080:8080"
+          volumes:
+            - /opt/cicd/jenkins_home:/var/jenkins_home
+            - /var/run/docker.sock:/var/run/docker.sock
+          group_add:
+            - "{{ docker_socket_gid.stdout }}"
+
+        registry:
+          image: registry:2
+          container_name: local-registry
+          restart: unless-stopped
+          network_mode: host
+          volumes:
+            - /opt/cicd/registry:/var/lib/registry
+
+- name: Start jenkins and the local image registry
+  ansible.builtin.command:
+    cmd: docker compose -f /opt/cicd/compose.yaml up --build --detach
+    chdir: /opt/cicd
+  changed_when: false
+
+- name: Verify jenkins can use host docker daemon
+  ansible.builtin.command:
+    cmd: docker exec jenkins docker info
+  changed_when: false
+
+- name: Wait for jenkins to become ready
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8080/login
+    status_code: 200
+  register: jenkins_health
+  until: jenkins_health.status == 200
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Verify local docker registry is ready
+  ansible.builtin.uri:
+    url: http://127.0.0.1:5000/v2/
+    status_code: 200
+  register: registry_health
+  until: registry_health.status == 200
+  retries: 10
+  delay: 2
+  changed_when: false
+
+- name: Allow jenkins web interface
+  community.general.ufw:
+    rule: allow
+    port: "8080"
+    proto: tcp
+
+- name: Remove broad docker registry rule
+  community.general.ufw:
+    rule: allow
+    port: "5000"
+    proto: tcp
+    src: "192.168.56.0/24"
+    delete: true
+
+- name: Allow docker registry
+  community.general.ufw:
+    rule: allow
+    port: "5000"
+    proto: tcp
+    src: "{{ item }}"
+  loop:
+    - "192.168.56.13"
+    - "192.168.56.14"
