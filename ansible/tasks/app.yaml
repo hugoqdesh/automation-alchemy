@@ -84,10 +84,46 @@
         exit 2
       fi
 
+      if [[ -f /opt/app/release.env ]]; then
+        cp /opt/app/release.env /opt/app/previous-release.env
+      fi
+
       umask 077
       printf 'APP_IMAGE=%s\n' "$app_image" > /opt/app/release.env
       docker compose --env-file /opt/app/release.env \
         --file /opt/app/compose.yaml up --detach
+
+- name: Create application rollback script
+  ansible.builtin.copy:
+    dest: /opt/app/rollback.sh
+    owner: root
+    group: deploy
+    mode: "0750"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      current_file=/opt/app/release.env
+      previous_file=/opt/app/previous-release.env
+      test -r "$current_file"
+      test -r "$previous_file"
+
+      source "$previous_file"
+      expected_pattern='^192\.168\.56\.14:5000/diagnostic-app:[a-f0-9]{40}$'
+      if [[ ! "${APP_IMAGE:-}" =~ $expected_pattern ]]; then
+        echo "previous-release.env does not contain an immutable application image" >&2
+        exit 2
+      fi
+
+      temporary_file="$(mktemp /opt/app/release.env.rollback.XXXXXX)"
+      cp "$current_file" "$temporary_file"
+      cp "$previous_file" "$current_file"
+      cp "$temporary_file" "$previous_file"
+      rm -f "$temporary_file"
+
+      docker compose --env-file "$current_file" \
+        --file /opt/app/compose.yaml up --detach
+      /opt/app/verify-release.sh
 
 - name: Create application release health-check script
   ansible.builtin.copy:
