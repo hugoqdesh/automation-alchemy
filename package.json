@@ -1,0 +1,7 @@
+{
+	"name": "diagnostic-app",
+	"private": true,
+	"scripts": {
+		"test": "node --test"
+	}
+}

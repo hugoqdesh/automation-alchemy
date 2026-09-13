@@ -100,7 +100,7 @@
       FROM jenkins/jenkins:lts-jdk17
       USER root
       RUN apt-get update \
-          && apt-get install --no-install-recommends -y docker.io docker-cli openssh-client \
+          && apt-get install --no-install-recommends -y docker.io docker-cli nodejs npm openssh-client \
           && rm -rf /var/lib/apt/lists/*
       RUN jenkins-plugin-cli --plugins configuration-as-code job-dsl
       USER jenkins
@@ -119,6 +119,9 @@
         - script: |
             pipelineJob('diagnostic-app') {
               description('Build and deploy the diagnostic application')
+              triggers {
+                scm('H/5 * * * *')
+              }
               definition {
                 cpsScm {
                   scm {
