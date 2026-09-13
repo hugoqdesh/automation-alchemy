@@ -1,0 +1,7 @@
+.git
+.vagrant
+ansible
+jenkins
+README.md
+setup.sh
+Vagrantfile
