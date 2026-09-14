@@ -102,7 +102,7 @@
       RUN apt-get update \
           && apt-get install --no-install-recommends -y docker.io docker-cli nodejs npm openssh-client \
           && rm -rf /var/lib/apt/lists/*
-      RUN jenkins-plugin-cli --plugins configuration-as-code job-dsl
+      RUN jenkins-plugin-cli --plugins workflow-job configuration-as-code job-dsl
       USER jenkins
 
 - name: Configure Jenkins automatically
