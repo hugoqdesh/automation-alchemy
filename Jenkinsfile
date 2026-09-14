@@ -110,7 +110,6 @@ pipeline {
                         /opt/app/verify-release.sh
                   '''
               }
-            }
             post {
                 failure {
                     sh '''
@@ -125,4 +124,5 @@ pipeline {
                 }
             }
         }
+}
 }

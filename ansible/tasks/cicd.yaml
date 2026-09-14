@@ -69,6 +69,15 @@
     group: "1000"
     mode: "0700"
 
+- name: Create Jenkins admin password file
+  ansible.builtin.copy:
+    dest: /opt/cicd/jenkins.env
+    owner: deploy
+    group: deploy
+    mode: "0600"
+    content: |
+      JENKINS_ADMIN_PASSWORD=automation-alchemy-admin
+
 - name: Generate jenkins deployment key
   ansible.builtin.command:
     cmd: >-
@@ -102,7 +111,9 @@
       RUN apt-get update \
           && apt-get install --no-install-recommends -y docker.io docker-cli nodejs npm openssh-client \
           && rm -rf /var/lib/apt/lists/*
-      RUN jenkins-plugin-cli --plugins workflow-job configuration-as-code job-dsl
+      RUN jenkins-plugin-cli --plugins \
+          workflow-job workflow-cps workflow-scm-step \
+          pipeline-model-definition git configuration-as-code job-dsl
       USER jenkins
 
 - name: Configure Jenkins automatically
@@ -114,6 +125,15 @@
     content: |
       jenkins:
         systemMessage: "Jenkins is configured by Ansible."
+        securityRealm:
+          local:
+            allowsSignup: false
+            users:
+              - id: admin
+                password: "${JENKINS_ADMIN_PASSWORD}"
+        authorizationStrategy:
+          loggedInUsersCanDoAnything:
+            allowAnonymousRead: false
 
       jobs:
         - script: |
@@ -158,6 +178,8 @@
           restart: unless-stopped
           ports:
             - "8080:8080"
+          env_file:
+            - /opt/cicd/jenkins.env
           environment:
             CASC_JENKINS_CONFIG: /var/jenkins_home/jenkins.yaml
           volumes:
