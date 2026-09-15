@@ -6,12 +6,6 @@
       - docker-compose-v2
     state: present
 
-- name: Add deploy user to docker group
-  ansible.builtin.user:
-    name: deploy
-    groups: docker
-    append: true
-
 - name: Start docker
   ansible.builtin.service:
     name: docker
@@ -41,16 +35,16 @@
   ansible.builtin.file:
     path: /opt/cicd
     state: directory
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0755"
 
 - name: Create registry directory
   ansible.builtin.file:
     path: /opt/cicd/registry
     state: directory
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0755"
 
 - name: Create Jenkins data directory
@@ -72,11 +66,13 @@
 - name: Create Jenkins admin password file
   ansible.builtin.copy:
     dest: /opt/cicd/jenkins.env
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0600"
     content: |
       JENKINS_ADMIN_PASSWORD=automation-alchemy-admin
+      DEVOPS_PASSWORD={{ local_secrets.devops_password }}
+  no_log: true
 
 - name: Generate jenkins deployment key
   ansible.builtin.command:
@@ -102,8 +98,8 @@
 - name: Create jenkins image definition
   ansible.builtin.copy:
     dest: /opt/cicd/Dockerfile
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0644"
     content: |
       FROM jenkins/jenkins:lts-jdk17
@@ -113,14 +109,16 @@
           && rm -rf /var/lib/apt/lists/*
       RUN jenkins-plugin-cli --plugins \
           workflow-job workflow-cps workflow-scm-step \
-          pipeline-model-definition git configuration-as-code job-dsl
+          pipeline-model-definition git configuration-as-code job-dsl \
+          credentials-binding plain-credentials
       USER jenkins
+  register: jenkins_image_definition
 
 - name: Configure Jenkins automatically
   ansible.builtin.copy:
     dest: /opt/cicd/jenkins.yaml
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0644"
     content: |
       jenkins:
@@ -134,6 +132,16 @@
         authorizationStrategy:
           loggedInUsersCanDoAnything:
             allowAnonymousRead: false
+
+      credentials:
+        system:
+          domainCredentials:
+            - credentials:
+                - string:
+                    scope: GLOBAL
+                    id: devops-sudo-password
+                    secret: "${DEVOPS_PASSWORD}"
+                    description: "Password-protected app administration"
 
       jobs:
         - script: |
@@ -158,6 +166,8 @@
               }
             }
 
+  register: jenkins_configuration
+
 - name: Read docker socket group ID
   ansible.builtin.command: stat --format=%g /var/run/docker.sock
   register: docker_socket_gid
@@ -166,8 +176,8 @@
 - name: Configure jenkins and the local image registry
   ansible.builtin.copy:
     dest: /opt/cicd/compose.yaml
-    owner: deploy
-    group: deploy
+    owner: root
+    group: root
     mode: "0644"
     content: |
       services:
@@ -176,12 +186,14 @@
             context: .
           container_name: jenkins
           restart: unless-stopped
-          ports:
-            - "8080:8080"
+          network_mode: host
+          labels:
+            configuration: "{{ jenkins_configuration.checksum }}"
           env_file:
             - /opt/cicd/jenkins.env
           environment:
             CASC_JENKINS_CONFIG: /var/jenkins_home/jenkins.yaml
+            JENKINS_OPTS: --httpListenAddress=127.0.0.1
           volumes:
             - /opt/cicd/jenkins_home:/var/jenkins_home
             - /opt/cicd/jenkins.yaml:/var/jenkins_home/jenkins.yaml:ro
@@ -194,14 +206,17 @@
           container_name: local-registry
           restart: unless-stopped
           network_mode: host
+          environment:
+            REGISTRY_HTTP_ADDR: 192.168.56.14:5000
           volumes:
             - /opt/cicd/registry:/var/lib/registry
 
 - name: Start jenkins and the local image registry
   ansible.builtin.command:
-    cmd: docker compose -f /opt/cicd/compose.yaml up --build --force-recreate --detach
+    cmd: docker compose -f /opt/cicd/compose.yaml up {{ '--build' if jenkins_image_definition.changed else '' }} --detach
     chdir: /opt/cicd
-  changed_when: false
+  register: cicd_start
+  changed_when: "'Started' in cicd_start.stderr or 'Created' in cicd_start.stderr or 'Recreated' in cicd_start.stderr"
 
 - name: Verify jenkins can use host docker daemon
   ansible.builtin.command:
@@ -220,7 +235,7 @@
 
 - name: Verify local docker registry is ready
   ansible.builtin.uri:
-    url: http://127.0.0.1:5000/v2/
+    url: http://192.168.56.14:5000/v2/
     status_code: 200
   register: registry_health
   until: registry_health.status == 200
@@ -228,11 +243,12 @@
   delay: 2
   changed_when: false
 
-- name: Allow jenkins web interface
+- name: Remove external Jenkins access (use an SSH tunnel)
   community.general.ufw:
     rule: allow
     port: "8080"
     proto: tcp
+    delete: true
 
 - name: Remove broad docker registry rule
   community.general.ufw:

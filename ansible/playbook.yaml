@@ -1,6 +1,21 @@
 ---
+- name: Bootstrap the devops administrator
+  hosts: all
+  any_errors_fatal: true
+  gather_facts: false
+  become: true
+  vars:
+    machine_id_path: "{{ inventory_dir }}/../.vagrant/machines/{{ vm_name }}/virtualbox/id"
+    bootstrap_ready: "{{ (lookup('file', inventory_dir + '/../.local/' + vm_name + '.id', errors='ignore') | default('', true) | trim) == (lookup('file', machine_id_path) | trim) }}"
+    ansible_user: "{{ 'devops' if bootstrap_ready else 'vagrant' }}"
+    ansible_ssh_private_key_file: "{{ inventory_dir }}/../{{ '.local/devops_ed25519' if bootstrap_ready else '.vagrant/machines/' + vm_name + '/virtualbox/private_key' }}"
+    ansible_become_password: "{{ local_secrets.devops_password if bootstrap_ready else '' }}"
+  tasks:
+    - ansible.builtin.include_tasks: tasks/bootstrap.yaml
+
 - name: Configure all servers
   hosts: all
+  any_errors_fatal: true
   become: true
   tasks:
     - ansible.builtin.include_tasks: tasks/common.yaml
@@ -26,12 +41,6 @@
   become: true
   tasks:
     - ansible.builtin.include_tasks: tasks/webservers.yaml
-  handlers:
-    - name: Reload nginx
-      ansible.builtin.service:
-        name: nginx
-        state: reloaded
-
 - name: Configure application server
   hosts: app
   become: true
@@ -55,7 +64,7 @@
         state: restarted
 
 - name: Configure Jenkins deployment access
-  hosts: app
+  hosts: app:webservers
   become: true
   tasks:
     - ansible.builtin.include_tasks: tasks/deployment-access.yaml

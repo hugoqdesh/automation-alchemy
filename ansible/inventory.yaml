@@ -1,6 +1,9 @@
 all:
   vars:
-    ansible_user: vagrant
+    ansible_user: devops
+    ansible_ssh_private_key_file: "{{ inventory_dir }}/../.local/devops_ed25519"
+    local_secrets: "{{ lookup('file', inventory_dir + '/../.local/credentials.json') | from_json }}"
+    ansible_become_password: "{{ local_secrets.devops_password }}"
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 loadbalancer:
@@ -8,29 +11,29 @@ loadbalancer:
     loadbalancer_host_01:
       ansible_host: 127.0.0.1
       ansible_port: 2222
-      ansible_ssh_private_key_file: .vagrant/machines/loadbalancer/virtualbox/private_key
+      vm_name: loadbalancer
 
 webservers:
   hosts:
     webserver_host_01:
       ansible_host: 127.0.0.1
       ansible_port: 2200
-      ansible_ssh_private_key_file: .vagrant/machines/web1/virtualbox/private_key
+      vm_name: web1
     webserver_host_02:
       ansible_host: 127.0.0.1
       ansible_port: 2201
-      ansible_ssh_private_key_file: .vagrant/machines/web2/virtualbox/private_key
+      vm_name: web2
 
 app:
   hosts:
     app_host_01:
       ansible_host: 127.0.0.1
       ansible_port: 2202
-      ansible_ssh_private_key_file: .vagrant/machines/app/virtualbox/private_key
+      vm_name: app
 
 cicd:
   hosts:
     cicd_host_01:
       ansible_host: 127.0.0.1
       ansible_port: 2203
-      ansible_ssh_private_key_file: .vagrant/machines/cicd/virtualbox/private_key
+      vm_name: cicd

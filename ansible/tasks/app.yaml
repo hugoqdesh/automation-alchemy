@@ -6,12 +6,6 @@
       - docker-compose-v2
     state: present
 
-- name: Add deploy user to docker group
-  ansible.builtin.user:
-    name: deploy
-    groups: docker
-    append: true
-
 - name: Start docker
   ansible.builtin.service:
     name: docker
@@ -41,23 +35,15 @@
   ansible.builtin.file:
     path: /opt/app
     state: directory
-    owner: deploy
-    group: deploy
-    mode: "0755"
-
-- name: Create deployment directory
-  ansible.builtin.file:
-    path: /opt/app/releases
-    state: directory
-    owner: deploy
-    group: deploy
+    owner: root
+    group: devops
     mode: "0755"
 
 - name: Configure application deployment service
   ansible.builtin.copy:
     dest: /opt/app/compose.yaml
-    owner: deploy
-    group: deploy
+    owner: root
+    group: devops
     mode: "0644"
     content: |
       services:
@@ -66,12 +52,14 @@
           image: ${APP_IMAGE:?APP_IMAGE must be an immutable Git-SHA image reference}
           network_mode: host
           restart: unless-stopped
+          environment:
+            NODE_NAME: app
 
 - name: Create application deployment script
   ansible.builtin.copy:
     dest: /opt/app/deploy.sh
     owner: root
-    group: deploy
+    group: devops
     mode: "0750"
     content: |
       #!/usr/bin/env bash
@@ -97,7 +85,7 @@
   ansible.builtin.copy:
     dest: /opt/app/rollback.sh
     owner: root
-    group: deploy
+    group: devops
     mode: "0750"
     content: |
       #!/usr/bin/env bash
@@ -129,7 +117,7 @@
   ansible.builtin.copy:
     dest: /opt/app/verify-release.sh
     owner: root
-    group: deploy
+    group: devops
     mode: "0750"
     content: |
       #!/usr/bin/env bash
@@ -143,17 +131,14 @@
         exit 2
       fi
 
+      expected_image="${1:-$APP_IMAGE}"
+      test "$APP_IMAGE" = "$expected_image"
       running_image="$(docker inspect --format '{{ "{{" }}.Config.Image{{ "}}" }}' diagnostic-app)"
       test "$running_image" = "$APP_IMAGE"
-      curl --fail --silent --show-error http://127.0.0.1:3000/health
-
-- name: Create application SSH directory
-  ansible.builtin.file:
-    path: /home/deploy/.ssh
-    state: directory
-    owner: deploy
-    group: deploy
-    mode: "0700"
+      curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:3000/health
+      if [[ $# -gt 0 ]]; then
+        curl --fail --silent --show-error http://127.0.0.1:3000/version | grep -Fx "{\"version\":\"${APP_IMAGE##*:}\"}"
+      fi
 
 - name: Remove broad application port rule
   community.general.ufw:

@@ -1,0 +1,181 @@
+---
+- name: Verify mandatory VM configuration
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Optionally reboot before checking persistent configuration
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: reboot_for_test | default(false) | bool
+
+    - name: Read hostname
+      ansible.builtin.command: hostname
+      register: actual_hostname
+      changed_when: false
+
+    - name: Read interface addresses
+      ansible.builtin.command: ip -j -4 address show
+      register: addresses
+      changed_when: false
+
+    - name: Check configured identity and static IP
+      ansible.builtin.assert:
+        that:
+          - actual_hostname.stdout == vm_name
+          - "expected_ips[vm_name] in (addresses.stdout | from_json | map(attribute='addr_info') | flatten | map(attribute='local') | list)"
+      vars:
+        expected_ips:
+          {
+            loadbalancer: "192.168.56.10",
+            web1: "192.168.56.11",
+            web2: "192.168.56.12",
+            app: "192.168.56.13",
+            cicd: "192.168.56.14",
+          }
+
+    - name: Resolve and ping every VM by hostname
+      ansible.builtin.command: "ping -c 1 -W 3 {{ item }}"
+      loop: [loadbalancer, web1, web2, app, cicd]
+      changed_when: false
+
+    - name: Read devops groups
+      ansible.builtin.command: id -nG devops
+      register: devops_groups
+      changed_when: false
+
+    - name: Read effective SSH settings
+      ansible.builtin.command: /usr/sbin/sshd -T
+      register: ssh_settings
+      changed_when: false
+
+    - name: Confirm sudo cannot run without a password
+      ansible.builtin.command: sudo -n true
+      become: false
+      register: passwordless_sudo
+      changed_when: false
+      failed_when: passwordless_sudo.rc == 0
+
+    - name: Read the login umask
+      ansible.builtin.command: bash -lc umask
+      become: false
+      register: login_umask
+      changed_when: false
+
+    - name: Check administrator and SSH restrictions
+      ansible.builtin.assert:
+        that:
+          - "devops_groups.stdout.split() | sort == ['devops', 'sudo']"
+          - "'allowusers devops' in ssh_settings.stdout_lines"
+          - "'passwordauthentication no' in ssh_settings.stdout_lines"
+          - "'kbdinteractiveauthentication no' in ssh_settings.stdout_lines"
+          - "'permitrootlogin no' in ssh_settings.stdout_lines"
+          - login_umask.stdout == '0027'
+
+    - name: Verify the old Vagrant key cannot log in
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - "-oBatchMode=yes"
+          - "-oConnectTimeout=5"
+          - "-oStrictHostKeyChecking=no"
+          - "-oUserKnownHostsFile=/dev/null"
+          - "-oIdentitiesOnly=yes"
+          - "-i"
+          - "{{ inventory_dir }}/../.vagrant/machines/{{ vm_name }}/virtualbox/private_key"
+          - "-p"
+          - "{{ ansible_port | string }}"
+          - "vagrant@127.0.0.1"
+          - "true"
+      delegate_to: localhost
+      become: false
+      register: rejected_login
+      changed_when: false
+      failed_when: rejected_login.rc == 0
+
+    - name: Inspect pending package upgrades
+      ansible.builtin.command: apt-get -s dist-upgrade
+      register: package_updates
+      changed_when: false
+
+    - name: Assert no installable package upgrades remain
+      ansible.builtin.assert:
+        that: "package_updates.stdout_lines | select('match', '^Inst ') | list | length == 0"
+
+    - name: Inspect active firewall
+      ansible.builtin.command: ufw status verbose
+      register: firewall
+      changed_when: false
+
+    - name: Check firewall is enabled with incoming deny
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in firewall.stdout"
+          - "'deny (incoming)' in firewall.stdout"
+
+- name: Verify Jenkins can authenticate and use password-protected sudo
+  hosts: cicd
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Exercise Jenkins deployment credential on each destination
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - jenkins
+          - sh
+          - "-c"
+          - >-
+            printf '%s\n' "$DEVOPS_PASSWORD" |
+            ssh -i /var/jenkins_home/.ssh/id_ed25519 -oBatchMode=yes
+            -oIdentitiesOnly=yes -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null
+            devops@{{ item }} "sudo -S -p '' id -u"
+      loop: [192.168.56.11, 192.168.56.12, 192.168.56.13]
+      register: jenkins_sudo
+      changed_when: false
+      failed_when: jenkins_sudo.rc != 0 or jenkins_sudo.stdout != '0'
+      no_log: true
+
+- name: Verify frontend containers
+  hosts: webservers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Verify Docker is installed
+      ansible.builtin.command: docker --version
+      changed_when: false
+    - name: Check frontend runs
+      ansible.builtin.command: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' frontend
+      register: frontend_running
+      changed_when: false
+      failed_when: frontend_running.stdout != 'true'
+
+- name: Verify load balancing and application metrics
+  hosts: loadbalancer
+  gather_facts: false
+  tasks:
+    - name: Request multiple frontend pages
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+      register: frontend_responses
+      loop: "{{ range(0, 10) | list }}"
+
+    - name: Confirm both web servers respond through the load balancer
+      ansible.builtin.assert:
+        that: "frontend_responses.results | map(attribute='x_served_by') | unique | sort == ['web1', 'web2']"
+
+    - name: Read application metrics through the public route
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/metrics
+        return_content: true
+      register: metrics
+
+    - name: Check the metrics contract
+      ansible.builtin.assert:
+        that:
+          - metrics.json.node == 'app'
+          - metrics.json.cpuCount > 0
+          - metrics.json.memoryTotalBytes > 0
+          - metrics.json.diskTotalBytes > 0
+          - metrics.json.version | length > 0

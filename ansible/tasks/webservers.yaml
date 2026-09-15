@@ -1,37 +1,62 @@
 ---
-- name: Install nginx
-  ansible.builtin.apt: { name: nginx, state: present }
-- name: Allow http through firewall
-  community.general.ufw: { rule: allow, port: "80", proto: tcp }
-- name: Create web directory
+- name: Install frontend container tools
+  ansible.builtin.apt:
+    name: [docker.io, docker-compose-v2]
+    state: present
+
+- name: Start Docker
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Check installed services for an earlier host Nginx
+  ansible.builtin.service_facts:
+
+- name: Stop the previous host Nginx service
+  ansible.builtin.service:
+    name: nginx
+    state: stopped
+    enabled: false
+  when: "'nginx.service' in ansible_facts.services"
+
+- name: Remove unrestricted web traffic rule
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+    delete: true
+
+- name: Allow web requests from the load balancer
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+    src: 192.168.56.10
+
+- name: Create frontend directory
   ansible.builtin.file:
-    {
-      path: /var/www/app,
-      state: directory,
-      owner: deploy,
-      group: deploy,
-      mode: "0755",
-    }
-- name: Create temporary application page
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: [/opt/frontend, /opt/frontend/html, /opt/frontend/nginx]
+
+- name: Install the metrics dashboard
   ansible.builtin.copy:
-    dest: /var/www/app/index.html
-    owner: deploy
-    group: deploy
+    src: "{{ playbook_dir }}/../frontend/index.html"
+    dest: /opt/frontend/html/index.html
     mode: "0644"
-    content: |
-      <!DOCTYPE html>
-      <html><head><title>Automation Alchemy</title></head>
-      <body><h1>Web server is running</h1><p>Hostname: {{ inventory_hostname }}</p></body></html>
-- name: Configure web server
+
+- name: Configure frontend reverse proxy
   ansible.builtin.copy:
-    dest: /etc/nginx/sites-available/app
+    dest: /opt/frontend/nginx/default.conf
     mode: "0644"
     content: |
       server {
           listen 80;
           server_name _;
-          root /var/www/app;
-          index index.html;
+          root /usr/share/nginx/html;
+          add_header X-Served-By {{ vm_name }} always;
           location / { try_files $uri $uri/ =404; }
           location /api/ {
               proxy_pass http://192.168.56.13:3000/;
@@ -39,25 +64,37 @@
               proxy_set_header X-Real-IP $remote_addr;
           }
       }
-  notify: Reload nginx
-- name: Enable web server conf
-  ansible.builtin.file:
-    {
-      src: /etc/nginx/sites-available/app,
-      dest: /etc/nginx/sites-enabled/app,
-      state: link,
-      force: true,
-    }
-  notify: Reload nginx
-- name: Remove default nginx conf
-  ansible.builtin.file:
-    { path: /etc/nginx/sites-enabled/default, state: absent }
-  notify: Reload nginx
-- name: Validate nginx configuration
-  ansible.builtin.command: nginx -t
+  register: frontend_nginx
+
+- name: Configure frontend container
+  ansible.builtin.copy:
+    dest: /opt/frontend/compose.yaml
+    mode: "0644"
+    content: |
+      services:
+        frontend:
+          image: nginx:stable-alpine
+          container_name: frontend
+          restart: unless-stopped
+          network_mode: host
+          volumes:
+            - /opt/frontend/html:/usr/share/nginx/html:ro
+            - /opt/frontend/nginx:/etc/nginx/conf.d:ro
+
+- name: Start frontend container
+  ansible.builtin.command: docker compose -f /opt/frontend/compose.yaml up --detach
+  register: frontend_start
+  changed_when: "'Started' in frontend_start.stderr or 'Created' in frontend_start.stderr or 'Recreated' in frontend_start.stderr"
+
+- name: Validate frontend configuration
+  ansible.builtin.command: docker exec frontend nginx -t
   changed_when: false
-- name: Ensure nginx is running
-  ansible.builtin.service: { name: nginx, state: started, enabled: true }
-- name: Verify web server nginx is active
-  ansible.builtin.command: systemctl is-active nginx
-  changed_when: false
+
+- name: Reload changed frontend configuration
+  ansible.builtin.command: docker exec frontend nginx -s reload
+  when: frontend_nginx.changed and not frontend_start.changed
+
+- name: Verify frontend serves its dashboard
+  ansible.builtin.uri:
+    url: http://127.0.0.1/
+    status_code: 200

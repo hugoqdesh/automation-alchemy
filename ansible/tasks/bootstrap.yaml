@@ -1,0 +1,57 @@
+---
+- name: Hash the generated administrator password
+  ansible.builtin.command:
+    argv:
+      [
+        openssl,
+        passwd,
+        "-6",
+        "-salt",
+        "{{ local_secrets.password_salt }}",
+        "-stdin",
+      ]
+    stdin: "{{ local_secrets.devops_password }}"
+  register: devops_password_hash
+  changed_when: false
+  no_log: true
+
+- name: Create the devops administrator
+  ansible.builtin.user:
+    name: devops
+    shell: /bin/bash
+    create_home: true
+    groups: sudo
+    password: "{{ devops_password_hash.stdout }}"
+  no_log: true
+
+- name: Authorize the controller SSH key
+  ansible.posix.authorized_key:
+    user: devops
+    key: "{{ lookup('file', inventory_dir + '/../.local/devops_ed25519.pub') }}"
+
+- name: Restrict the administrator home directory
+  ansible.builtin.file:
+    path: /home/devops
+    state: directory
+    owner: devops
+    group: devops
+    mode: "0750"
+
+- name: Require a password for every devops sudo command
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/99-devops
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+    content: |
+      devops ALL=(ALL:ALL) PASSWD: ALL
+      Defaults:devops !exempt_group, timestamp_timeout=0
+
+- name: Remember this VM's completed administrator bootstrap
+  ansible.builtin.copy:
+    dest: "{{ inventory_dir }}/../.local/{{ vm_name }}.id"
+    content: "{{ lookup('file', machine_id_path) | trim }}\n"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
