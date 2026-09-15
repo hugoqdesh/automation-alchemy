@@ -1,7 +1,9 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY server.js .
+ARG GIT_SHA=development
+ENV APP_VERSION=$GIT_SHA
+COPY --chown=node:node server.js .
 
 USER node
 EXPOSE 3000

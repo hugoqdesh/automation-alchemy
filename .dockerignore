@@ -1,7 +1,3 @@
-.git
-.vagrant
-ansible
-jenkins
-README.md
-setup.sh
-Vagrantfile
+**
+!Dockerfile
+!server.js
