@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width,initial-scale=1" />
+		<title>Automation Alchemy</title>
+		<style>
+			:root {
+				color-scheme: light dark;
+				font-family: system-ui, sans-serif;
+			}
+			body {
+				max-width: 850px;
+				margin: 3rem auto;
+				padding: 0 1.2rem;
+			}
+			h1 {
+				margin-bottom: 0.4rem;
+			}
+			p {
+				line-height: 1.6;
+			}
+			dl {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 1rem;
+			}
+			dt,
+			dd {
+				margin: 0;
+				padding: 0.8rem;
+				border-bottom: 1px solid #8885;
+			}
+			dd {
+				font-variant-numeric: tabular-nums;
+				overflow-wrap: anywhere;
+			}
+			small {
+				color: #888;
+			}
+			#status {
+				min-height: 1.6em;
+			}
+			@media (max-width: 480px) {
+				dl {
+					grid-template-columns: 1fr;
+					gap: 0;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Infrastructure status</h1>
+		<p>Live readings from the application VM. Refreshes every five seconds.</p>
+		<p id="status" role="status">Loading metrics…</p>
+		<dl>
+			<dt>Application VM</dt>
+			<dd id="node">—</dd>
+			<dt>Frontend serving this request</dt>
+			<dd id="frontend">—</dd>
+			<dt>Deployed Git version</dt>
+			<dd id="version">—</dd>
+			<dt>CPU cores</dt>
+			<dd id="cpu">—</dd>
+			<dt>Load average (1 / 5 / 15 min)</dt>
+			<dd id="load">—</dd>
+			<dt>Memory in use / total</dt>
+			<dd id="memory">—</dd>
+			<dt>App filesystem available / total</dt>
+			<dd id="disk">—</dd>
+			<dt>VM uptime</dt>
+			<dd id="uptime">—</dd>
+		</dl>
+
+		<script>
+			const show = (id, value) => {
+				document.getElementById(id).textContent = value;
+			};
+			const gib = (value) => `${(value / 1024 ** 3).toFixed(2)} GiB`;
+			async function refresh() {
+				try {
+					const response = await fetch("/api/metrics", {
+						cache: "no-store",
+						signal: AbortSignal.timeout(4000),
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					const data = await response.json();
+					show("node", data.node);
+					show("frontend", response.headers.get("X-Served-By") || "unknown");
+					show("version", data.version);
+					show("cpu", data.cpuCount);
+					show(
+						"load",
+						data.loadAverage.map((value) => value.toFixed(2)).join(" / "),
+					);
+					show(
+						"memory",
+						`${gib(data.memoryTotalBytes - data.memoryFreeBytes)} / ${gib(data.memoryTotalBytes)}`,
+					);
+					show(
+						"disk",
+						`${gib(data.diskAvailableBytes)} / ${gib(data.diskTotalBytes)}`,
+					);
+					show("uptime", `${Math.floor(data.uptimeSeconds / 60)} minutes`);
+					show(
+						"status",
+						`Healthy · updated ${new Date().toLocaleTimeString()}`,
+					);
+				} catch {
+					show(
+						"status",
+						"Metrics unavailable. Displayed readings may be stale; retrying shortly.",
+					);
+				} finally {
+					setTimeout(refresh, 5000);
+				}
+			}
+			refresh();
+		</script>
+	</body>
+</html>
